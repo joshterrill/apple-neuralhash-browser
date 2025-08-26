@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Apple NeuralHash Image Hasher</title>
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 min-h-screen flex items-center justify-center">
+  <div class="w-full max-w-3xl bg-white shadow-lg rounded-xl p-6">
+    <h1 class="text-2xl font-bold mb-4 text-center">Apple NeuralHash Image Hasher</h1>
+
+    <div class="flex justify-center mb-6">
+      <button id="toggleMode" class="px-4 py-2 bg-gray-700 text-white rounded-lg hover:bg-gray-800">
+        Switch to Comparison Mode
+      </button>
+    </div>
+
+    <div id="singleMode" class="flex flex-col items-center">
+      <div id="dropSingle" class="border-2 border-dashed border-gray-400 rounded-lg h-48 w-full flex flex-col items-center justify-center cursor-pointer bg-gray-50 hover:bg-gray-100">
+        <p class="text-gray-500">Drag & Drop Image</p>
+        <img id="previewSingle" class="hidden mt-2 max-h-36 object-contain"/>
+      </div>
+      <button id="runSingle" class="mt-6 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">Run Hash</button>
+    </div>
+
+    <div id="compareMode" class="hidden">
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div id="drop1" class="border-2 border-dashed border-gray-400 rounded-lg h-48 flex flex-col items-center justify-center cursor-pointer bg-gray-50 hover:bg-gray-100">
+          <p class="text-gray-500">Drag & Drop First Image</p>
+          <img id="preview1" class="hidden mt-2 max-h-36 object-contain"/>
+        </div>
+        <div id="drop2" class="border-2 border-dashed border-gray-400 rounded-lg h-48 flex flex-col items-center justify-center cursor-pointer bg-gray-50 hover:bg-gray-100">
+          <p class="text-gray-500">Drag & Drop Second Image</p>
+          <img id="preview2" class="hidden mt-2 max-h-36 object-contain"/>
+        </div>
+      </div>
+      <button id="runCompare" class="mt-6 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">Compare Hashes</button>
+    </div>
+
+    <div id="results" class="mt-6 text-sm font-mono text-gray-700 whitespace-pre-wrap"></div>
+  </div>
+
+  <script>
+    const MODEL_URL = "./model.onnx";
+    const DAT_URL = "./neuralhash_128x96_seed1.dat";
+
+    let session, seed1;
+    let fileSingle = null, file1 = null, file2 = null;
+    let inCompareMode = false;
+
+    async function initModel() {
+      session = await ort.InferenceSession.create(MODEL_URL, { executionProviders: ["wasm"] });
+      const response = await fetch(DAT_URL);
+      const buffer = await response.arrayBuffer();
+      const floats = new Float32Array(buffer.slice(128));
+      seed1 = [];
+      for (let i = 0; i < 96; i++) {
+        seed1.push(floats.slice(i * 128, (i + 1) * 128));
+      }
+    }
+
+    async function preprocessImage(file) {
+      return new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement("canvas");
+          canvas.width = 360; canvas.height = 360;
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0, 360, 360);
+          const { data } = ctx.getImageData(0, 0, 360, 360);
+
+          const arr = new Float32Array(1 * 3 * 360 * 360);
+          for (let y = 0; y < 360; y++) {
+            for (let x = 0; x < 360; x++) {
+              const idx = (y * 360 + x) * 4;
+              const r = data[idx] / 255.0 * 2 - 1;
+              const g = data[idx+1] / 255.0 * 2 - 1;
+              const b = data[idx+2] / 255.0 * 2 - 1;
+              const base = y * 360 + x;
+              arr[0 * 360 * 360 + base] = r;
+              arr[1 * 360 * 360 + base] = g;
+              arr[2 * 360 * 360 + base] = b;
+            }
+          }
+          resolve(arr);
+        };
+        img.src = URL.createObjectURL(file);
+      });
+    }
+
+    async function computeHash(file) {
+      const arr = await preprocessImage(file);
+      const inputTensor = new ort.Tensor("float32", arr, [1,3,360,360]);
+      const results = await session.run({ [session.inputNames[0]]: inputTensor });
+      const flat = results[session.outputNames[0]].data;
+
+      const hashOutput = new Float32Array(96);
+      for (let i = 0; i < 96; i++) {
+        let sum = 0;
+        for (let j = 0; j < 128; j++) {
+          sum += seed1[i][j] * flat[j];
+        }
+        hashOutput[i] = sum;
+      }
+      return Array.from(hashOutput).map(x => (x >= 0 ? "1" : "0")).join("");
+    }
+
+    function bitsToHex(bits) {
+      return BigInt("0b" + bits).toString(16).padStart(bits.length / 4, "0");
+    }
+
+    function hammingDistance(bits1, bits2) {
+      let dist = 0;
+      for (let i = 0; i < bits1.length; i++) if (bits1[i] !== bits2[i]) dist++;
+      return dist;
+    }
+
+    function setupDrop(dropEl, previewEl, setter) {
+      dropEl.addEventListener("dragover", (e) => { e.preventDefault(); dropEl.classList.add("bg-blue-50"); });
+      dropEl.addEventListener("dragleave", () => dropEl.classList.remove("bg-blue-50"));
+      dropEl.addEventListener("drop", (e) => {
+        e.preventDefault(); dropEl.classList.remove("bg-blue-50");
+        const file = e.dataTransfer.files[0];
+        if (file) { setter(file); previewEl.src = URL.createObjectURL(file); previewEl.classList.remove("hidden"); }
+      });
+      dropEl.addEventListener("click", () => {
+        const input = document.createElement("input");
+        input.type = "file"; input.accept = "image/*";
+        input.onchange = () => {
+          const file = input.files[0];
+          if (file) { setter(file); previewEl.src = URL.createObjectURL(file); previewEl.classList.remove("hidden"); }
+        };
+        input.click();
+      });
+    }
+
+    document.getElementById("toggleMode").onclick = () => {
+      inCompareMode = !inCompareMode;
+      document.getElementById("singleMode").classList.toggle("hidden", inCompareMode);
+      document.getElementById("compareMode").classList.toggle("hidden", !inCompareMode);
+      document.getElementById("toggleMode").textContent = inCompareMode ? "Switch to Single Image Mode" : "Switch to Comparison Mode";
+      document.getElementById("results").textContent = "";
+      fileSingle = file1 = file2 = null;
+      document.querySelectorAll("img").forEach(img => img.classList.add("hidden"));
+    };
+
+    document.getElementById("runSingle").onclick = async () => {
+      if (!fileSingle) return alert("Please upload an image.");
+      const resultsEl = document.getElementById("results");
+      resultsEl.textContent = "Running inference...\n";
+      const bits = await computeHash(fileSingle);
+      const hex = bitsToHex(bits);
+      resultsEl.textContent = `Image Hash:\n${hex}\n`;
+    };
+
+    document.getElementById("runCompare").onclick = async () => {
+      if (!file1 || !file2) return alert("Please upload both images.");
+      const resultsEl = document.getElementById("results");
+      resultsEl.textContent = "Running inference...\n";
+      const bits1 = await computeHash(file1);
+      const bits2 = await computeHash(file2);
+      const hex1 = bitsToHex(bits1);
+      const hex2 = bitsToHex(bits2);
+      const ham = hammingDistance(bits1, bits2);
+      resultsEl.textContent =
+        `Image 1 Hash:\n${hex1}\n\nImage 2 Hash:\n${hex2}\n\n` +
+        `Hamming Distance: ${ham} / ${bits1.length}\n` +
+        `Similarity: ${((1 - ham / bits1.length) * 100).toFixed(2)}%\n`;
+    };
+
+    initModel();
+    setupDrop(document.getElementById("dropSingle"), document.getElementById("previewSingle"), f => fileSingle = f);
+    setupDrop(document.getElementById("drop1"), document.getElementById("preview1"), f => file1 = f);
+    setupDrop(document.getElementById("drop2"), document.getElementById("preview2"), f => file2 = f);
+  </script>
+</body>
+</html>
