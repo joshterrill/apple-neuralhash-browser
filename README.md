@@ -1,5 +1,7 @@
 # Apple Neuralhash (in browser)
 
+https://joshterrill.github.io/apple-neuralhash-browser/
+
 a simple in-browser image hasher using the Apple Neuralhash model, with options for image comparisons using hamming distance
 
 ## Setup
